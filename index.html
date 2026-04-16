@@ -3,40 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Job Booking Dashboard - Apex Plumbing</title>
-    
-    <!-- React & Tailwind -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
-
+    
     <!-- Firebase SDKs -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
-        /* Hide scrollbars for a cleaner look */
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-    </style>
 </head>
-<body class="bg-slate-100">
-    <div id="root"></div>
+<body class="bg-transparent">
 
-    <script type="text/babel">
-        const { useState, useEffect } = React;
-
-        // --- CONFIGURATION ---
-        // Using the live Google Script URL you provided
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycby2TE5eChF_Gdjmxv-DDskQAB3n5cIBFFk4iSJA1rbDOgrf5rwHl6WTRMAtlufD8U9i5A/exec"; 
+    <div class="max-w-md mx-auto bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div class="bg-slate-800 p-4 text-white flex items-center gap-2">
+            <i data-lucide="calendar-check" class="w-5 h-5 text-blue-400"></i>
+            <h3 class="font-bold text-lg">Recently Booked Jobs</h3>
+        </div>
         
-        // Firebase Setup
-        const firebaseConfig = {
+        <div id="loading-state" class="p-8 text-center text-slate-500 flex flex-col items-center justify-center">
+            <i data-lucide="loader-2" class="w-6 h-6 animate-spin mb-2 text-blue-600"></i>
+            <p class="text-sm">Syncing live schedule...</p>
+        </div>
+
+        <div id="jobs-container" class="divide-y divide-slate-100 hidden max-h-96 overflow-y-auto">
+            <!-- Jobs will be injected here by JavaScript -->
+        </div>
+        
+        <div id="empty-state" class="hidden p-8 text-center text-slate-500">
+            <p class="text-sm">No recent bookings to display.</p>
+        </div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        // 1. FIREBASE CONFIGURATION
+        // MUST MATCH the config used in your Client Form and Netlify Dashboard
+     const firebaseConfig = {
   apiKey: "AIzaSyDFHXBZPJGcGUQTMimjAIHzztQ2gf94BbM",
   authDomain: "apexplumbingsystem.firebaseapp.com",
   projectId: "apexplumbingsystem",
@@ -51,295 +53,85 @@
         const db = firebase.firestore();
         const auth = firebase.auth();
 
-        const App = () => {
-            const [leads, setLeads] = useState([]);
-            const [selectedLead, setSelectedLead] = useState(null);
-            const [bookingDate, setBookingDate] = useState("");
-            const [bookingTime, setBookingTime] = useState("");
-            const [loading, setLoading] = useState(false);
-            const [user, setUser] = useState(null);
+        // 2. AUTHENTICATE & FETCH DATA
+        async function initLiveSchedule() {
+            try {
+                // Required authentication before reading data
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await auth.signInWithCustomToken(__initial_auth_token);
+                } else {
+                    await auth.signInAnonymously();
+                }
 
-            // 1. Authenticate user before querying database
-            useEffect(() => {
-                const initAuth = async () => {
-                    try {
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await auth.signInWithCustomToken(__initial_auth_token);
-                        } else {
-                            await auth.signInAnonymously();
-                        }
-                    } catch (error) {
-                        console.error("Auth Error:", error);
+                // Listen for auth state changes to ensure user is logged in before querying
+                auth.onAuthStateChanged((user) => {
+                    if (user) {
+                        const container = document.getElementById('jobs-container');
+                        const loading = document.getElementById('loading-state');
+                        const empty = document.getElementById('empty-state');
+
+                        // Listen to the exact same database your form and dashboard use
+                        db.collection(`artifacts/${appId}/public/data/submissions`).onSnapshot((snapshot) => {
+                            const allLeads = snapshot.docs.map(doc => doc.data());
+                            
+                            // Filter for jobs that have been scheduled in the dashboard
+                            const scheduledJobs = allLeads.filter(lead => 
+                                (lead.status === 'scheduled' || lead.status === 'accepted') && 
+                                lead.scheduledDate
+                            );
+
+                            // Sort by scheduled date (newest first)
+                            scheduledJobs.sort((a, b) => new Date(b.scheduledDate) - new Date(a.scheduledDate));
+
+                            loading.classList.add('hidden');
+
+                            if (scheduledJobs.length === 0) {
+                                container.classList.add('hidden');
+                                empty.classList.remove('hidden');
+                                return;
+                            }
+
+                            empty.classList.add('hidden');
+                            container.classList.remove('hidden');
+                            container.innerHTML = '';
+
+                            // Display the up to 5 most recent booked jobs
+                            scheduledJobs.slice(0, 5).forEach(job => {
+                                // Format the date nicely
+                                const dateObj = new Date(job.scheduledDate);
+                                const formattedDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                                
+                                // Mask the client's last name for privacy on a public website
+                                const firstName = job.name.split(' ')[0];
+                                const lastInitial = job.name.split(' ').length > 1 ? job.name.split(' ')[1].charAt(0) + '.' : '';
+                                const publicName = `${firstName} ${lastInitial}`;
+
+                                const jobHtml = `
+                                    <div class="p-4 hover:bg-slate-50 transition-colors">
+                                        <div class="flex justify-between items-start mb-1">
+                                            <h4 class="font-bold text-slate-800 text-sm">${publicName}</h4>
+                                            <span class="text-xs font-semibold px-2 py-1 bg-green-100 text-green-700 rounded-md">
+                                                ${formattedDate}
+                                            </span>
+                                        </div>
+                                        <p class="text-sm text-blue-600 font-medium">${job.serviceType}</p>
+                                    </div>
+                                `;
+                                container.innerHTML += jobHtml;
+                            });
+                        }, (error) => {
+                            console.error("Database connection error:", error);
+                            loading.innerHTML = "<p class='text-red-500 text-sm'>Failed to load schedule.</p>";
+                        });
                     }
-                };
-                initAuth();
+                });
 
-                const unsubscribe = auth.onAuthStateChanged(setUser);
-                return () => unsubscribe();
-            }, []);
-
-            // 2. Fetch leads once authenticated
-            useEffect(() => {
-                if (!user) return;
-
-                const unsubscribe = db.collection(`artifacts/${appId}/public/data/submissions`)
-                    .onSnapshot((snapshot) => {
-                        const allLeads = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                        
-                        // Filter for 'pending' requests in JS memory (avoids complex query indexing issues)
-                        const pendingLeads = allLeads.filter(lead => lead.status === 'pending');
-                        
-                        // Sort by newest first
-                        pendingLeads.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-                        
-                        setLeads(pendingLeads);
-                        
-                        // If the currently selected lead gets scheduled elsewhere, deselect it
-                        if (selectedLead && !pendingLeads.find(l => l.id === selectedLead.id)) {
-                            setSelectedLead(null);
-                        }
-                    }, (error) => {
-                        console.error("Firestore Error:", error);
-                    });
-
-                return () => unsubscribe();
-            }, [user, selectedLead]);
-
-            const handleBookJob = async () => {
-                if (!bookingDate || !bookingTime) {
-                    alert("Please select both a date and a time.");
-                    return;
-                }
-
-                setLoading(true);
-                try {
-                    // 1. Update status in Database
-                    await db.collection(`artifacts/${appId}/public/data/submissions`).doc(selectedLead.id).update({
-                        status: 'scheduled',
-                        scheduledDate: bookingDate,
-                        scheduledTime: bookingTime,
-                        updatedAt: new Date().toISOString()
-                    });
-
-                    // 2. Trigger Google Script (Creates Calendar event, notifies client, updates HubSpot)
-                    const payload = {
-                        ...selectedLead,
-                        action: 'schedule_confirmation',
-                        scheduledDate: bookingDate,
-                        scheduledTime: bookingTime
-                    };
-
-                    await fetch(GOOGLE_SCRIPT_URL, {
-                        method: 'POST',
-                        mode: 'no-cors',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-
-                    // We don't use window.alert inside the canvas to avoid breaking the iframe, using a custom modal or just clearing state
-                    setSelectedLead(null);
-                    setBookingDate("");
-                    setBookingTime("");
-                    
-                } catch (error) {
-                    console.error("Scheduling Error:", error);
-                } finally {
-                    setLoading(false);
-                }
-            };
-
-            const Icon = ({ name, className }) => {
-                const iconHtml = lucide.icons[name]?.toSvg({ class: className, width: 20, height: 20 });
-                return iconHtml ? <span dangerouslySetInnerHTML={{ __html: iconHtml }} /> : null;
-            };
-
-            if (!user) {
-                return (
-                    <div className="flex items-center justify-center h-screen">
-                        <div className="flex flex-col items-center gap-3 text-slate-500">
-                            <Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-600" />
-                            <p className="font-medium">Connecting to Database...</p>
-                        </div>
-                    </div>
-                );
+            } catch (error) {
+                console.error("Auth Error:", error);
             }
+        }
 
-            return (
-                <div className="flex h-screen overflow-hidden">
-                    {/* Sidebar: Lead List */}
-                    <aside className="w-1/3 max-w-sm bg-white border-r border-slate-200 flex flex-col">
-                        <div className="p-6 border-b border-slate-200 bg-white sticky top-0 z-10 shadow-sm">
-                            <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                                <div className="bg-blue-600 p-1.5 rounded-lg text-white">
-                                    <Icon name="layout-dashboard" className="w-5 h-5" />
-                                </div>
-                                Job Dashboard
-                            </h1>
-                            <p className="text-sm text-slate-500 mt-2 font-medium">
-                                {leads.length} pending request{leads.length !== 1 ? 's' : ''}
-                            </p>
-                        </div>
-                        
-                        <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-slate-100 bg-slate-50">
-                            {leads.length === 0 ? (
-                                <div className="p-10 text-center text-slate-400 flex flex-col items-center gap-2">
-                                    <Icon name="inbox" className="w-10 h-10 text-slate-300" />
-                                    <p>Inbox is empty.</p>
-                                </div>
-                            ) : leads.map(lead => (
-                                <div 
-                                    key={lead.id} 
-                                    onClick={() => setSelectedLead(lead)}
-                                    className={`p-5 cursor-pointer transition-all border-l-4 ${selectedLead?.id === lead.id ? 'bg-blue-50 border-blue-600 shadow-inner' : 'hover:bg-white border-transparent'}`}
-                                >
-                                    <div className="flex justify-between items-start mb-1">
-                                        <h3 className="font-bold text-slate-800">{lead.name}</h3>
-                                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full">Pending</span>
-                                    </div>
-                                    <p className="text-sm font-semibold text-blue-700">{lead.serviceType}</p>
-                                    <p className="text-xs text-slate-500 mt-2 truncate flex items-center gap-1">
-                                        <Icon name="map-pin" className="w-3 h-3"/> {lead.address}
-                                    </p>
-                                    <p className="text-[10px] text-slate-400 mt-2">
-                                        Received: {new Date(lead.createdAt).toLocaleDateString()}
-                                    </p>
-                                </div>
-                            ))}
-                        </div>
-                    </aside>
-
-                    {/* Main Area: Booking Panel */}
-                    <main className="flex-1 bg-slate-50 relative overflow-y-auto">
-                        {selectedLead ? (
-                            <div className="max-w-3xl mx-auto p-8">
-                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                                    {/* Header Info */}
-                                    <div className="p-8 border-b border-slate-100">
-                                        <div className="flex justify-between items-start">
-                                            <div>
-                                                <h2 className="text-3xl font-bold text-slate-900">{selectedLead.name}</h2>
-                                                <div className="flex flex-wrap gap-4 mt-3">
-                                                    <a href={`mailto:${selectedLead.email}`} className="text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1.5 transition-colors">
-                                                        <Icon name="mail" className="w-4 h-4"/> {selectedLead.email}
-                                                    </a>
-                                                    <a href={`tel:${selectedLead.phone}`} className="text-slate-600 hover:text-slate-900 font-medium flex items-center gap-1.5 transition-colors">
-                                                        <Icon name="phone" className="w-4 h-4"/> {selectedLead.phone}
-                                                    </a>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Job Details */}
-                                    <div className="p-8 space-y-8">
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                            <div>
-                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Service Requested</h4>
-                                                <div className="inline-flex items-center gap-2 bg-blue-50 text-blue-800 font-semibold px-3 py-1.5 rounded-lg border border-blue-100">
-                                                    <Icon name="tool" className="w-4 h-4"/>
-                                                    {selectedLead.serviceType}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Job Location</h4>
-                                                <p className="text-slate-800 font-medium flex items-start gap-2">
-                                                    <Icon name="map-pin" className="w-5 h-5 text-slate-400 shrink-0 mt-0.5"/> 
-                                                    {selectedLead.address}
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Client Description</h4>
-                                            <div className="bg-slate-50 rounded-xl border border-slate-200 p-5 text-slate-700 leading-relaxed italic">
-                                                "{selectedLead.description}"
-                                            </div>
-                                        </div>
-
-                                        {/* Photo Preview Section (if any were uploaded) */}
-                                        {selectedLead.photos && selectedLead.photos.length > 0 && (
-                                            <div>
-                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                                                    <Icon name="image" className="w-4 h-4"/> Uploaded Photos
-                                                </h4>
-                                                <div className="flex flex-wrap gap-4">
-                                                    {selectedLead.photos.map((photoBase64, idx) => (
-                                                        <div key={idx} className="relative w-32 h-32 rounded-xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-                                                            <a href={photoBase64} target="_blank" rel="noopener noreferrer">
-                                                                <img src={photoBase64} alt={`Upload ${idx+1}`} className="object-cover w-full h-full hover:scale-105 transition-transform duration-300" />
-                                                            </a>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    {/* Booking Form Area */}
-                                    <div className="bg-slate-800 p-8 text-white">
-                                        <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-                                            <Icon name="calendar-clock" className="w-6 h-6 text-blue-400" /> 
-                                            Schedule & Dispatch
-                                        </h3>
-                                        
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                            <div>
-                                                <label className="block text-sm font-semibold text-slate-300 mb-2">Select Date</label>
-                                                <input 
-                                                    type="date" 
-                                                    value={bookingDate} 
-                                                    onChange={(e) => setBookingDate(e.target.value)} 
-                                                    className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all [color-scheme:dark]" 
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-semibold text-slate-300 mb-2">Arrival Time</label>
-                                                <input 
-                                                    type="time" 
-                                                    value={bookingTime} 
-                                                    onChange={(e) => setBookingTime(e.target.value)} 
-                                                    className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all [color-scheme:dark]" 
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div className="mt-6 flex flex-col md:flex-row items-center gap-6">
-                                            <button 
-                                                onClick={handleBookJob} 
-                                                disabled={loading} 
-                                                className="w-full md:w-auto px-8 py-3.5 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold transition-all disabled:opacity-70 flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20"
-                                            >
-                                                {loading ? <Icon name="loader-2" className="w-5 h-5 animate-spin" /> : "Confirm Schedule"}
-                                                {!loading && <Icon name="arrow-right" className="w-5 h-5" />}
-                                            </button>
-                                            
-                                            <div className="flex-1 flex flex-wrap gap-4 text-xs font-medium text-slate-400">
-                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Updates Google Calendar</span>
-                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Emails Client Confirmation</span>
-                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Logs to HubSpot CRM</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-5 p-8 text-center">
-                                <div className="bg-white p-6 rounded-full shadow-sm border border-slate-200">
-                                    <Icon name="calendar-days" className="w-16 h-16 text-slate-300" />
-                                </div>
-                                <div>
-                                    <h3 className="text-xl font-bold text-slate-600">No Request Selected</h3>
-                                    <p className="mt-1 text-slate-500 max-w-sm">Select a pending job request from the sidebar to review the details and schedule an appointment.</p>
-                                </div>
-                            </div>
-                        )}
-                    </main>
-                </div>
-            );
-        };
-
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        initLiveSchedule();
     </script>
 </body>
 </html>
