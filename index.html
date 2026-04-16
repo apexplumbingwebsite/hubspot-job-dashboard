@@ -3,114 +3,339 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Apex Plumbing Portal</title>
-    <!-- React and Babel CDN -->
+    <title>Job Booking Dashboard - Apex Plumbing</title>
+    
+    <!-- React & Tailwind -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- HubSpot Forms Script (Required for the embed to work) -->
-    <script charset="utf-8" type="text/javascript" src="//js.hsforms.net/forms/embed/v2.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+        /* Hide scrollbars for a cleaner look */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
 </head>
-<body class="bg-slate-50">
+<body class="bg-slate-100">
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect } = React;
 
-        const App = () => {
-            // We use a "view" state to switch between the Client Form and the Admin Dashboard
-            const [view, setView] = useState('client'); 
-            const [jobs, setJobs] = useState([]);
-            const [selectedJob, setSelectedJob] = useState(null);
-            const [searchTerm, setSearchTerm] = useState('');
-            const [filter, setFilter] = useState('All');
+        // --- CONFIGURATION ---
+        // Using the live Google Script URL you provided
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycby2TE5eChF_Gdjmxv-DDskQAB3n5cIBFFk4iSJA1rbDOgrf5rwHl6WTRMAtlufD8U9i5A/exec"; 
+        
+        // Firebase Setup
+        const firebaseConfig = {
+  apiKey: "AIzaSyDFHXBZPJGcGUQTMimjAIHzztQ2gf94BbM",
+  authDomain: "apexplumbingsystem.firebaseapp.com",
+  projectId: "apexplumbingsystem",
+  storageBucket: "apexplumbingsystem.firebasestorage.app",
+  messagingSenderId: "312950475322",
+  appId: "1:312950475322:web:c03298f8d0e9bf350e0303",
+  measurementId: "G-NKVBKNR4NR"
+};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'apex-plumbing-app';
+        
+        if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }
+        const db = firebase.firestore();
+        const auth = firebase.auth();
 
+        const App = () => {
+            const [leads, setLeads] = useState([]);
+            const [selectedLead, setSelectedLead] = useState(null);
+            const [bookingDate, setBookingDate] = useState("");
+            const [bookingTime, setBookingTime] = useState("");
+            const [loading, setLoading] = useState(false);
+            const [user, setUser] = useState(null);
+
+            // 1. Authenticate user before querying database
             useEffect(() => {
-                // Check URL for ?admin=true to automatically show the dashboard
-                const params = new URLSearchParams(window.location.search);
-                if (params.get('admin') === 'true') {
-                    setView('admin');
-                }
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await auth.signInWithCustomToken(__initial_auth_token);
+                        } else {
+                            await auth.signInAnonymously();
+                        }
+                    } catch (error) {
+                        console.error("Auth Error:", error);
+                    }
+                };
+                initAuth();
+
+                const unsubscribe = auth.onAuthStateChanged(setUser);
+                return () => unsubscribe();
             }, []);
 
+            // 2. Fetch leads once authenticated
             useEffect(() => {
-                // THIS IS WHERE THE HUBSPOT MAGIC HAPPENS
-                if (view === 'client' && window.hbspt) {
-                    window.hbspt.forms.create({
-                        region: "na1",
-                        portalId: "148112678", // Replace with your Portal ID
-                        formId: "fb29941f-c872-404f-a741-f2af1c156385",     // Replace with your Form ID
-                        target: "#hubspot-form-container"
+                if (!user) return;
+
+                const unsubscribe = db.collection(`artifacts/${appId}/public/data/submissions`)
+                    .onSnapshot((snapshot) => {
+                        const allLeads = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        
+                        // Filter for 'pending' requests in JS memory (avoids complex query indexing issues)
+                        const pendingLeads = allLeads.filter(lead => lead.status === 'pending');
+                        
+                        // Sort by newest first
+                        pendingLeads.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                        
+                        setLeads(pendingLeads);
+                        
+                        // If the currently selected lead gets scheduled elsewhere, deselect it
+                        if (selectedLead && !pendingLeads.find(l => l.id === selectedLead.id)) {
+                            setSelectedLead(null);
+                        }
+                    }, (error) => {
+                        console.error("Firestore Error:", error);
                     });
+
+                return () => unsubscribe();
+            }, [user, selectedLead]);
+
+            const handleBookJob = async () => {
+                if (!bookingDate || !bookingTime) {
+                    alert("Please select both a date and a time.");
+                    return;
                 }
-            }, [view]);
 
-            // --- UI COMPONENTS ---
+                setLoading(true);
+                try {
+                    // 1. Update status in Database
+                    await db.collection(`artifacts/${appId}/public/data/submissions`).doc(selectedLead.id).update({
+                        status: 'scheduled',
+                        scheduledDate: bookingDate,
+                        scheduledTime: bookingTime,
+                        updatedAt: new Date().toISOString()
+                    });
 
-            const ClientView = () => (
-                <div className="max-w-2xl mx-auto px-4 py-16">
-                    <div className="text-center mb-12">
-                        <h1 className="text-4xl font-bold tracking-tight mb-4">Request a Service</h1>
-                        <p className="text-slate-500 text-lg">Fast, reliable plumbing solutions by Apex Plumbing.</p>
+                    // 2. Trigger Google Script (Creates Calendar event, notifies client, updates HubSpot)
+                    const payload = {
+                        ...selectedLead,
+                        action: 'schedule_confirmation',
+                        scheduledDate: bookingDate,
+                        scheduledTime: bookingTime
+                    };
+
+                    await fetch(GOOGLE_SCRIPT_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    // We don't use window.alert inside the canvas to avoid breaking the iframe, using a custom modal or just clearing state
+                    setSelectedLead(null);
+                    setBookingDate("");
+                    setBookingTime("");
+                    
+                } catch (error) {
+                    console.error("Scheduling Error:", error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const Icon = ({ name, className }) => {
+                const iconHtml = lucide.icons[name]?.toSvg({ class: className, width: 20, height: 20 });
+                return iconHtml ? <span dangerouslySetInnerHTML={{ __html: iconHtml }} /> : null;
+            };
+
+            if (!user) {
+                return (
+                    <div className="flex items-center justify-center h-screen">
+                        <div className="flex flex-col items-center gap-3 text-slate-500">
+                            <Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-600" />
+                            <p className="font-medium">Connecting to Database...</p>
+                        </div>
                     </div>
-                    <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-100">
-                        {/* THE FORM INJECTS HERE */}
-                        <div id="hubspot-form-container"></div>
-                    </div>
-                    <div className="mt-8 text-center">
-                        <button onClick={() => setView('admin')} className="text-slate-400 text-xs hover:underline">
-                            Admin Login
-                        </button>
-                    </div>
-                </div>
-            );
+                );
+            }
 
-            const AdminDashboard = () => (
-                <div className="min-h-screen flex flex-col font-sans text-slate-900 animate-in fade-in duration-500">
-                    <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-orange-500 p-2 rounded-lg text-white">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
-                            </div>
-                            <h1 className="text-xl font-bold tracking-tight">Apex Admin Dashboard</h1>
+            return (
+                <div className="flex h-screen overflow-hidden">
+                    {/* Sidebar: Lead List */}
+                    <aside className="w-1/3 max-w-sm bg-white border-r border-slate-200 flex flex-col">
+                        <div className="p-6 border-b border-slate-200 bg-white sticky top-0 z-10 shadow-sm">
+                            <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                                <div className="bg-blue-600 p-1.5 rounded-lg text-white">
+                                    <Icon name="layout-dashboard" className="w-5 h-5" />
+                                </div>
+                                Job Dashboard
+                            </h1>
+                            <p className="text-sm text-slate-500 mt-2 font-medium">
+                                {leads.length} pending request{leads.length !== 1 ? 's' : ''}
+                            </p>
                         </div>
-                        <div className="flex items-center gap-4">
-                            <input 
-                                type="text" 
-                                placeholder="Search leads..." 
-                                className="pl-4 pr-4 py-2 bg-slate-100 rounded-full text-sm outline-none w-64 focus:ring-2 focus:ring-orange-500"
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                            />
-                            <button onClick={() => setView('client')} className="text-sm text-slate-500 font-medium">Logout</button>
+                        
+                        <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-slate-100 bg-slate-50">
+                            {leads.length === 0 ? (
+                                <div className="p-10 text-center text-slate-400 flex flex-col items-center gap-2">
+                                    <Icon name="inbox" className="w-10 h-10 text-slate-300" />
+                                    <p>Inbox is empty.</p>
+                                </div>
+                            ) : leads.map(lead => (
+                                <div 
+                                    key={lead.id} 
+                                    onClick={() => setSelectedLead(lead)}
+                                    className={`p-5 cursor-pointer transition-all border-l-4 ${selectedLead?.id === lead.id ? 'bg-blue-50 border-blue-600 shadow-inner' : 'hover:bg-white border-transparent'}`}
+                                >
+                                    <div className="flex justify-between items-start mb-1">
+                                        <h3 className="font-bold text-slate-800">{lead.name}</h3>
+                                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full">Pending</span>
+                                    </div>
+                                    <p className="text-sm font-semibold text-blue-700">{lead.serviceType}</p>
+                                    <p className="text-xs text-slate-500 mt-2 truncate flex items-center gap-1">
+                                        <Icon name="map-pin" className="w-3 h-3"/> {lead.address}
+                                    </p>
+                                    <p className="text-[10px] text-slate-400 mt-2">
+                                        Received: {new Date(lead.createdAt).toLocaleDateString()}
+                                    </p>
+                                </div>
+                            ))}
                         </div>
-                    </header>
+                    </aside>
 
-                    <main className="flex-1 flex overflow-hidden" style={{height: 'calc(100vh - 73px)'}}>
-                        <div className="w-1/3 border-r border-slate-200 bg-white flex flex-col overflow-hidden">
-                            <div className="p-4 border-b border-slate-100 flex gap-2 overflow-x-auto no-scrollbar">
-                                {['All', 'Requested', 'Scheduled'].map(s => (
-                                    <button key={s} onClick={() => setFilter(s)} className={`px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${filter === s ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}>{s}</button>
-                                ))}
+                    {/* Main Area: Booking Panel */}
+                    <main className="flex-1 bg-slate-50 relative overflow-y-auto">
+                        {selectedLead ? (
+                            <div className="max-w-3xl mx-auto p-8">
+                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                    {/* Header Info */}
+                                    <div className="p-8 border-b border-slate-100">
+                                        <div className="flex justify-between items-start">
+                                            <div>
+                                                <h2 className="text-3xl font-bold text-slate-900">{selectedLead.name}</h2>
+                                                <div className="flex flex-wrap gap-4 mt-3">
+                                                    <a href={`mailto:${selectedLead.email}`} className="text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1.5 transition-colors">
+                                                        <Icon name="mail" className="w-4 h-4"/> {selectedLead.email}
+                                                    </a>
+                                                    <a href={`tel:${selectedLead.phone}`} className="text-slate-600 hover:text-slate-900 font-medium flex items-center gap-1.5 transition-colors">
+                                                        <Icon name="phone" className="w-4 h-4"/> {selectedLead.phone}
+                                                    </a>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Job Details */}
+                                    <div className="p-8 space-y-8">
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                            <div>
+                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Service Requested</h4>
+                                                <div className="inline-flex items-center gap-2 bg-blue-50 text-blue-800 font-semibold px-3 py-1.5 rounded-lg border border-blue-100">
+                                                    <Icon name="tool" className="w-4 h-4"/>
+                                                    {selectedLead.serviceType}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Job Location</h4>
+                                                <p className="text-slate-800 font-medium flex items-start gap-2">
+                                                    <Icon name="map-pin" className="w-5 h-5 text-slate-400 shrink-0 mt-0.5"/> 
+                                                    {selectedLead.address}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Client Description</h4>
+                                            <div className="bg-slate-50 rounded-xl border border-slate-200 p-5 text-slate-700 leading-relaxed italic">
+                                                "{selectedLead.description}"
+                                            </div>
+                                        </div>
+
+                                        {/* Photo Preview Section (if any were uploaded) */}
+                                        {selectedLead.photos && selectedLead.photos.length > 0 && (
+                                            <div>
+                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                                                    <Icon name="image" className="w-4 h-4"/> Uploaded Photos
+                                                </h4>
+                                                <div className="flex flex-wrap gap-4">
+                                                    {selectedLead.photos.map((photoBase64, idx) => (
+                                                        <div key={idx} className="relative w-32 h-32 rounded-xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                                                            <a href={photoBase64} target="_blank" rel="noopener noreferrer">
+                                                                <img src={photoBase64} alt={`Upload ${idx+1}`} className="object-cover w-full h-full hover:scale-105 transition-transform duration-300" />
+                                                            </a>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Booking Form Area */}
+                                    <div className="bg-slate-800 p-8 text-white">
+                                        <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                                            <Icon name="calendar-clock" className="w-6 h-6 text-blue-400" /> 
+                                            Schedule & Dispatch
+                                        </h3>
+                                        
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            <div>
+                                                <label className="block text-sm font-semibold text-slate-300 mb-2">Select Date</label>
+                                                <input 
+                                                    type="date" 
+                                                    value={bookingDate} 
+                                                    onChange={(e) => setBookingDate(e.target.value)} 
+                                                    className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all [color-scheme:dark]" 
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-semibold text-slate-300 mb-2">Arrival Time</label>
+                                                <input 
+                                                    type="time" 
+                                                    value={bookingTime} 
+                                                    onChange={(e) => setBookingTime(e.target.value)} 
+                                                    className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all [color-scheme:dark]" 
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-6 flex flex-col md:flex-row items-center gap-6">
+                                            <button 
+                                                onClick={handleBookJob} 
+                                                disabled={loading} 
+                                                className="w-full md:w-auto px-8 py-3.5 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold transition-all disabled:opacity-70 flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20"
+                                            >
+                                                {loading ? <Icon name="loader-2" className="w-5 h-5 animate-spin" /> : "Confirm Schedule"}
+                                                {!loading && <Icon name="arrow-right" className="w-5 h-5" />}
+                                            </button>
+                                            
+                                            <div className="flex-1 flex flex-wrap gap-4 text-xs font-medium text-slate-400">
+                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Updates Google Calendar</span>
+                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Emails Client Confirmation</span>
+                                                <span className="flex items-center gap-1.5"><Icon name="check-circle-2" className="w-4 h-4 text-emerald-400"/> Logs to HubSpot CRM</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div className="flex-1 overflow-y-auto p-4 text-center text-slate-400 text-sm mt-10">
-                                Leads from HubSpot will appear here.
+                        ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-5 p-8 text-center">
+                                <div className="bg-white p-6 rounded-full shadow-sm border border-slate-200">
+                                    <Icon name="calendar-days" className="w-16 h-16 text-slate-300" />
+                                </div>
+                                <div>
+                                    <h3 className="text-xl font-bold text-slate-600">No Request Selected</h3>
+                                    <p className="mt-1 text-slate-500 max-w-sm">Select a pending job request from the sidebar to review the details and schedule an appointment.</p>
+                                </div>
                             </div>
-                        </div>
-                        <div className="flex-1 bg-slate-50 flex items-center justify-center text-slate-300">
-                            <p>Select a request to manage booking</p>
-                        </div>
+                        )}
                     </main>
                 </div>
             );
-
-            return view === 'client' ? <ClientView /> : <AdminDashboard />;
         };
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
